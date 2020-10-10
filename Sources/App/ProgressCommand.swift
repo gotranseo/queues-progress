@@ -12,7 +12,7 @@ import Vapor
 
 public struct ProgressCommand: Command {
     public struct Signature: CommandSignature {
-        @Option(name: "host", short: "h", help: "The host of the redis server")
+        @Option(name: "host", short: "b", help: "The host of the redis server")
         var host: String?
 
         @Option(name: "password", short: "p", help: "The password of the redis server")
@@ -23,6 +23,9 @@ public struct ProgressCommand: Command {
 
         @Option(name: "pending", short: "s", help: "Whether or not to check the pending queue. Defaults to `false` and checks the `processing` state")
         var pending: Bool?
+
+        @Option(name: "key", short: "k", help: "A specific key to filter against")
+        var key: String?
 
         public init() {}
     }
@@ -37,29 +40,49 @@ public struct ProgressCommand: Command {
 
     public init() { }
 
+    enum DataReturnType: String, CaseIterable {
+        case fullData = "Full Data"
+        case fullWithExpandedPayload = "Full Data (Expanded Payload)"
+        case overview = "Job Type Overview"
+    }
+
     public func run(using context: CommandContext, signature: Signature) throws {
         guard let host = signature.host else {
             context.console.error("Please specify a host", newLine: true)
             return
         }
 
-        guard let password = signature.password else {
-            context.console.error("Please specify a password", newLine: true)
-            return
-        }
-
         let config = try RedisConfiguration(hostname: host,
                                             port: 6379,
-                                            password: password,
+                                            password: signature.password,
                                             pool: .init(connectionRetryTimeout: .minutes(1)))
-        let redis = context.application.redis
-        redis.configuration = config
 
+        let redis = SimpleRedisClient(configuration: config, eventLoopGroup: MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount))
         let keyName = "vapor_queues[\(signature.queue ?? "default")]\((signature.pending ?? false) ? "" : "-processing")"
-        let keys = try redis.lrange(from: .init(keyName), fromIndex: 0).wait().compactMap { $0.string }.map { "job:\($0)" }
+        let keys = try redis
+            .lrange(from: .init(keyName), fromIndex: 0)
+            .wait()
+            .compactMap { $0.string }
+            .filter {
+                if let filteredKey = signature.key {
+                    return $0.lowercased() == filteredKey.lowercased()
+                }
+
+                return true
+            }
+            .map { "job:\($0)" }
+
         context.console.success("\(keys.count) keys fetched from the \((signature.pending ?? false) ? "" : "processing ")queue")
 
-        let dataType = context.console.choose("Data Return Type", from: ["Full Data", "Job Type Overview"])
+        let dataTypeString = context.console.choose("Data Return Type", from: DataReturnType.allCases.map { $0.rawValue })
+        guard var dataType = DataReturnType(rawValue: dataTypeString) else { throw Abort(.internalServerError) }
+
+        if dataType == .fullWithExpandedPayload {
+            let confirm = context.console.confirm("Continue with expanded payload data? If you haven't added a filter this may overwhelm your terminal.")
+            if !confirm {
+                dataType = .fullData
+            }
+        }
 
         let progressBar = context.console.loadingBar(title: "Loading Data")
         progressBar.start()
@@ -77,7 +100,7 @@ public struct ProgressCommand: Command {
         }
 
         progressBar.succeed()
-        if dataType == "Full Data" {
+        if dataType == .fullData || dataType == .fullWithExpandedPayload {
             for payload in dataReturned {
                 context.console.info("------------------------", newLine: true)
                 context.console.success(payload.key ?? "")
@@ -95,10 +118,15 @@ public struct ProgressCommand: Command {
                 } else {
                     context.console.output("N/A", style: .success)
                 }
+
+                if dataType == .fullWithExpandedPayload {
+                    context.console.output("    Payload Data: ", style: .info, newLine: false)
+                    context.console.output("\(String(bytes: payload.payload, encoding: .utf8)?.data(using: .utf8)?.prettyPrintedJSONString ?? "")", style: .success)
+                }
             }
         }
 
-        if dataType == "Job Type Overview" {
+        if dataType == .overview {
             dataReturned.map { $0.jobName }.histogram.forEach {
                 context.console.output("\($0.key): ", style: .info, newLine: false)
                 context.console.output("\($0.value)", style: .success)
@@ -119,5 +147,15 @@ struct PayloadData: Codable {
 extension Sequence where Element: Hashable {
     var histogram: [Element: Int] {
         return self.reduce(into: [:]) { counts, elem in counts[elem, default: 0] += 1 }
+    }
+}
+
+extension Data {
+    var prettyPrintedJSONString: String? {
+        guard let object = try? JSONSerialization.jsonObject(with: self, options: []),
+              let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted]),
+              let prettyPrintedString = String(data: data, encoding: .utf8) else { return nil }
+
+        return prettyPrintedString
     }
 }
