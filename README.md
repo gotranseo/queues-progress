@@ -19,7 +19,7 @@ git clone https://github.com/gotranseo/queues-progress
 cd queues-progress 
 swift build -c release 
 mv .build/release/Run /usr/local/bin/queues
-queues progress
+queues progress --help
 ```
 
 ## Usage 
