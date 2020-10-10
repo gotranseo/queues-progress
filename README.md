@@ -3,9 +3,9 @@
 QueuesProgress is a tiny CLI built to help you better understand what jobs are stuck/in progress for your Vapor Queues Redis instance. If you find yourself doing the following dance on a regular basis:
 
 ```sh
-redis-cli
-lrange vapor_queues[default]-processing 0 -1
-get job:key_name
+> redis-cli
+> lrange vapor_queues[default]-processing 0 -1
+> get job:key_name
 ```
 
 Just to get information about a specific job, this CLI can help you. 
